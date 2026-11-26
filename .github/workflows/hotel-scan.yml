@@ -5,16 +5,9 @@ concurrency:
   group: hotel-scan
   cancel-in-progress: false
 
+# 2026-11-26 用户叫停：定时与推送触发已全部去掉，只剩手动触发（workflow_dispatch），
+# 需要时可在 Actions 里手动跑，平时不会自动跑。
 on:
-  schedule:
-    - cron: '0 7 * * *'  # 每天 15:00（北京时间）跑一次
-  push:
-    paths:
-      - 'hotel-scan/scan.py'
-      - 'hotel-scan/seeds.txt'
-      - '.github/workflows/hotel-scan.yml'
-  # 注意：ip-library.json 故意不在触发列表里——它是每轮跑完提交回来的，
-  # 放进来会自触发死循环（跑完 -> 提交库 -> 又触发一轮）。
   workflow_dispatch:
 
 permissions:

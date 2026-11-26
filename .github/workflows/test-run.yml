@@ -3,11 +3,8 @@
 # test.py 本身一个字没改（md5 e3f804cbdfd05ae87509e4e5b09e2584），只包了一层 workflow。
 name: test-py-trial
 
+# 2026-11-26 用户叫停：推送触发已去掉，只剩手动触发（workflow_dispatch）。
 on:
-  push:
-    paths:
-      - 'hotel-scan/test.py'
-      - '.github/workflows/test-run.yml'
   workflow_dispatch:
 
 permissions:
