@@ -6,6 +6,8 @@ concurrency:
   cancel-in-progress: false
 
 on:
+  schedule:
+    - cron: '0 7 * * *'  # 每天 15:00（北京时间）跑一次
   push:
     paths:
       - 'hotel-scan/scan.py'
