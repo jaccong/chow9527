@@ -4,7 +4,8 @@
 流程：种子 -> /24 扩展 -> 扫活 IP -> 活 IP 取 JSON -> 只留名字含「翡翠台」的频道
 （排除「华丽翡翠台」）-> 结果写 candidates.json。
 
-跑在 GitHub Actions 上（runner 直连网络）；种子见 seeds.txt（2026-11-26 收集）。
+跑在 GitHub Actions 上（runner 直连网络）。种子两路合并：
+本地 seeds.txt + 远程 https://877622.xyz/ip/ips.txt（每次跑现拉，拉不到就只用本地）。
 """
 
 import concurrent.futures
@@ -20,6 +21,9 @@ BASE_DIR = Path(__file__).resolve().parent
 SEEDS_FILE = BASE_DIR / "seeds.txt"
 OUTPUT_FILE = BASE_DIR / "results" / "candidates.json"
 STATS_FILE = BASE_DIR / "results" / "scan_stats.json"
+
+IPS_TXT_URL = "https://877622.xyz/ip/ips.txt"
+REMOTE_SEED_TIMEOUT = 15   # 拉 ips.txt 超时（秒）；失败不致命，只用本地种子
 
 TIMEOUT = 2.5            # IP 扫描超时（秒；海外 runner 到国内酒店网关 RTT 大，1.0s 会漏活口）
 JSON_TIMEOUT = 6.0       # 频道 JSON 拉取超时（秒）
@@ -47,6 +51,8 @@ lock = threading.Lock()
 # 过程统计：跑完写进 scan_stats.json 一起提交回仓库，没扫到也能定位卡在哪一步。
 stats = {
     "seeds": 0,
+    "seeds_local": 0,
+    "seeds_remote": 0,
     "tasks": 0,
     "valid_ips": 0,
     "valid_by_seed": {},
@@ -85,18 +91,39 @@ def request_with_retry(url, timeout=TIMEOUT, **kwargs):
     return None
 
 
+SEED_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$")
+
+
+def load_remote_seeds():
+    """现拉 https://877622.xyz/ip/ips.txt，提 IP:端口。失败返回空集（不致命）。"""
+    try:
+        resp = session.get(IPS_TXT_URL, timeout=REMOTE_SEED_TIMEOUT)
+        if resp.status_code != 200:
+            print(f"【远程种子】拉取失败：HTTP {resp.status_code}，只用本地种子")
+            return set()
+        found = {m.group(0) for m in re.finditer(
+            r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+", resp.text)}
+        print(f"【远程种子】{IPS_TXT_URL} -> {len(found)} 个")
+        return found
+    except requests.exceptions.RequestException as e:
+        print(f"【远程种子】拉取异常（{e}），只用本地种子")
+        return set()
+
+
 def load_seeds():
-    seeds = []
+    local = set()
     for line in SEEDS_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
-        m = re.match(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$", line)
-        if not m:
+        if not SEED_RE.match(line):
             print(f"【种子跳过】格式不对：{line}")
             continue
-        seeds.append(line)
-    return sorted(set(seeds))
+        local.add(line)
+    remote = load_remote_seeds()
+    stats["seeds_local"] = len(local)
+    stats["seeds_remote"] = len(remote)
+    return sorted(local | remote)
 
 
 def expand_seed(seed):
@@ -175,11 +202,12 @@ def extract_jade(url):
 
 def main():
     seeds = load_seeds()
-    print(f"【种子】{len(seeds)} 个")
+    print(f"【种子】{len(seeds)} 个（本地 {stats['seeds_local']} + 远程 {stats['seeds_remote']}）")
     tasks = []
     for seed in seeds:
         tasks.extend(expand_seed(seed))
-    print(f"【扫描任务】{len(tasks)} 个（{len(seeds)} 种子 x 255）")
+    tasks = sorted(set(tasks))  # 多个种子同 /24 同端口会扩出重复地址，去重
+    print(f"【扫描任务】{len(tasks)} 个（去重后）")
 
     t0 = time.time()
     valid_urls = []

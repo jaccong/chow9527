@@ -1,5 +1,10 @@
 name: hotel-scan
 
+# 同一时间只跑一轮：多轮并发推结果回 main 会抢推送、丢结果
+concurrency:
+  group: hotel-scan
+  cancel-in-progress: false
+
 on:
   push:
     paths:
@@ -50,4 +55,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add hotel-scan/results/candidates.json hotel-scan/results/scan_stats.json hotel-scan/results/frames || true
-          git diff --cached --quiet && echo "no results to commit" || { git commit -m "hotel-scan results $(date -u +%Y-%m-%dT%H:%M:%SZ)"; git push; }
+          git diff --cached --quiet && echo "no results to commit" || { git commit -m "hotel-scan results $(date -u +%Y-%m-%dT%H:%M:%SZ)"; git pull --rebase || true; git push || echo "push raced with another run, results kept in artifact"; }
