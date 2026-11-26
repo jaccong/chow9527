@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "name": "翡翠台",
+    "url": "http://120.238.84.45:9901/tsfile/live/1103_1.m3u8?key=txiptv&playlive=1&authid=0",
+    "chid": 1103,
+    "srcid": 1,
+    "source_ip": "http://120.238.84.45:9901",
+    "json_url": "http://120.238.84.45:9901/iptv/live/1000.json?key=txiptv"
+  },
+  {
+    "name": "翡翠台",
+    "url": "http://120.238.94.82:9901/tsfile/live/1007_1.m3u8?key=txiptv&playlive=1&down=1",
+    "chid": 1007,
+    "srcid": 1,
+    "source_ip": "http://120.238.94.82:9901",
+    "json_url": "http://120.238.94.82:9901/iptv/live/1000.json?key=txiptv"
+  },
+  {
+    "name": "翡翠台",
+    "url": "http://183.239.226.235:9901/tsfile/live/1029_1.m3u8?key=txiptv&playlive=1&authid=0",
+    "chid": 1029,
+    "srcid": 1,
+    "source_ip": "http://183.239.226.235:9901",
+    "json_url": "http://183.239.226.235:9901/iptv/live/1000.json?key=txiptv"
+  }
+]
