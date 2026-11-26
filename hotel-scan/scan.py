@@ -19,9 +19,10 @@ import requests
 BASE_DIR = Path(__file__).resolve().parent
 SEEDS_FILE = BASE_DIR / "seeds.txt"
 OUTPUT_FILE = BASE_DIR / "results" / "candidates.json"
+STATS_FILE = BASE_DIR / "results" / "scan_stats.json"
 
-TIMEOUT = 1.0            # IP 扫描超时（秒）
-JSON_TIMEOUT = 3.0       # 频道 JSON 拉取超时（秒）
+TIMEOUT = 2.5            # IP 扫描超时（秒；海外 runner 到国内酒店网关 RTT 大，1.0s 会漏活口）
+JSON_TIMEOUT = 6.0       # 频道 JSON 拉取超时（秒）
 MAX_WORKERS = 500
 RETRY_TIMES = 1
 RETRY_INTERVAL = 0.02
@@ -42,6 +43,33 @@ session.headers.update(HEADERS)
 scan_counter = 0
 valid_counter = 0
 lock = threading.Lock()
+
+# 过程统计：跑完写进 scan_stats.json 一起提交回仓库，没扫到也能定位卡在哪一步。
+stats = {
+    "seeds": 0,
+    "tasks": 0,
+    "valid_ips": 0,
+    "valid_by_seed": {},
+    "json_ok": 0,
+    "json_fail": 0,
+    "json_parse_fail": 0,
+    "items_seen": 0,
+    "jade_hits": 0,
+    "duration_s": 0,
+}
+
+
+def seed_key_of(url):
+    """从探测 URL 反推它属于哪个种子（/24 + 端口），用于按种子统计可用数。"""
+    host = url.split("://", 1)[1].split("/", 1)[0]
+    ip, _, port = host.partition(":")
+    prefix = ".".join(ip.split(".")[:3]) + ".0/24"
+    return f"{prefix}:{port}"
+
+
+def bump(key, n=1):
+    with lock:
+        stats[key] += n
 
 
 def request_with_retry(url, timeout=TIMEOUT, **kwargs):
@@ -89,6 +117,8 @@ def is_url_accessible(url):
     if resp is not None:
         with lock:
             valid_counter += 1
+            key = seed_key_of(url)
+            stats["valid_by_seed"][key] = stats["valid_by_seed"].get(key, 0) + 1
         return url
     return None
 
@@ -97,11 +127,14 @@ def extract_jade(url):
     """活 IP 取一次 JSON，只留名字含翡翠台（排除华丽翡翠台）的频道。"""
     resp = request_with_retry(url, timeout=JSON_TIMEOUT)
     if resp is None:
+        bump("json_fail")
         return []
     try:
         data = resp.json()
     except ValueError:
+        bump("json_parse_fail")
         return []
+    bump("json_ok")
     if data.get("count", 0) == 0:
         return []
     # 频道 URL 拼装用的基址：http://IP:端口
@@ -112,12 +145,14 @@ def extract_jade(url):
     for item in data.get("data", []):
         if not isinstance(item, dict):
             continue
+        bump("items_seen")
         name = item.get("name", "")
         urlx = item.get("url", "")
         if not name or not urlx:
             continue
         if TARGET not in name or EXCLUDE in name:
             continue
+        bump("jade_hits")
         chid = item.get("chid", "")
         srcid = item.get("srcid", "")
         if urlx.startswith("http"):
@@ -171,6 +206,15 @@ def main():
     print(f"【完成】翡翠台候选 {len(candidates)} 条 -> {OUTPUT_FILE}")
     for c in candidates:
         print(f"  {c['name']} | {c['url']}")
+
+    stats["seeds"] = len(seeds)
+    stats["tasks"] = len(tasks)
+    stats["valid_ips"] = len(valid_urls)
+    stats["duration_s"] = round(time.time() - t0, 1)
+    stats["timeouts"] = {"probe_s": TIMEOUT, "json_s": JSON_TIMEOUT}
+    STATS_FILE.write_text(
+        json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"【统计】{json.dumps(stats, ensure_ascii=False)}")
 
 
 if __name__ == "__main__":
