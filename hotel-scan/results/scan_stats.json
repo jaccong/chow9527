@@ -2,8 +2,9 @@
   "seeds": 931,
   "seeds_local": 50,
   "seeds_remote": 884,
+  "library_seeds": 14,
   "tasks": 134895,
-  "valid_ips": 52,
+  "valid_ips": 51,
   "valid_by_seed": {
     "1.197.248.0/24:9901": 1,
     "101.74.28.0/24:9901": 1,
@@ -40,7 +41,6 @@
     "219.145.59.0/24:8888": 1,
     "221.7.175.0/24:9901": 1,
     "221.7.175.0/24:8445": 1,
-    "223.78.65.0/24:9901": 1,
     "39.107.120.0/24:8080": 3,
     "43.251.226.0/24:8080": 2,
     "43.251.226.0/24:9901": 1,
@@ -48,14 +48,30 @@
     "49.235.65.0/24:600": 1,
     "59.32.98.0/24:7788": 1
   },
-  "json_ok": 31,
+  "json_ok": 30,
   "json_fail": 0,
   "json_parse_fail": 21,
-  "items_seen": 1214,
+  "items_seen": 1162,
   "jade_hits": 3,
-  "duration_s": 1184.5,
+  "duration_s": 1192.0,
   "timeouts": {
     "probe_s": 2.5,
     "json_s": 6.0
+  },
+  "library": {
+    "rows": 14,
+    "t1": 3,
+    "t2": 9,
+    "t3": 2,
+    "archived": 0,
+    "new_t1": [],
+    "alive": 14,
+    "dead": 0
+  },
+  "metrics": {
+    "alive_rate": 0.0004,
+    "jade_rate": 0.0588,
+    "gd_coverage": null,
+    "stream_ok_rate": null
   }
 }
