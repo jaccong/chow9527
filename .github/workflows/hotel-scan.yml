@@ -10,8 +10,9 @@ on:
     paths:
       - 'hotel-scan/scan.py'
       - 'hotel-scan/seeds.txt'
-      - 'hotel-scan/frames.py'
       - '.github/workflows/hotel-scan.yml'
+  # 注意：ip-library.json 故意不在触发列表里——它是每轮跑完提交回来的，
+  # 放进来会自触发死循环（跑完 -> 提交库 -> 又触发一轮）。
   workflow_dispatch:
 
 permissions:
@@ -29,19 +30,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ffmpeg and requests
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          pip install -q requests
+      - name: Install requests
+        # 只要 requests：scan.py 只做 HTTP，不用 ffmpeg。ffmpeg 是给 frames.py
+        # 抽帧用的，用户已说不用验帧；apt-get 装 ffmpeg 曾卡住整轮（run 45786579992）。
+        run: pip install -q requests
 
       - name: Scan for Jade
         working-directory: hotel-scan
         run: python3 scan.py
-
-      - name: Extract frames for candidates
-        working-directory: hotel-scan
-        run: python3 frames.py
 
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
@@ -54,5 +50,5 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add hotel-scan/results/candidates.json hotel-scan/results/scan_stats.json hotel-scan/results/frames || true
+          git add hotel-scan/results/candidates.json hotel-scan/results/scan_stats.json hotel-scan/ip-library.json || true
           git diff --cached --quiet && echo "no results to commit" || { git commit -m "hotel-scan results $(date -u +%Y-%m-%dT%H:%M:%SZ)"; git pull --rebase || true; git push || echo "push raced with another run, results kept in artifact"; }

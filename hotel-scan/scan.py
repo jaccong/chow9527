@@ -4,8 +4,11 @@
 流程：种子 -> /24 扩展 -> 扫活 IP -> 活 IP 取 JSON -> 只留名字含「翡翠台」的频道
 （排除「华丽翡翠台」）-> 结果写 candidates.json。
 
-跑在 GitHub Actions 上（runner 直连网络）。种子两路合并：
-本地 seeds.txt + 远程 https://877622.xyz/ip/ips.txt（每次跑现拉，拉不到就只用本地）。
+跑在 GitHub Actions 上（runner 直连网络）。种子三路合并：
+本地 seeds.txt + 远程 https://877622.xyz/ip/ips.txt（每次跑现拉，拉不到就只用本地）
++ ip-library.json 里的已知网关（T1/T2 扩 /24，T3 只探本机）。
+跑完把结果写回 ip-library.json：活着的更新 last_alive/频道/分级，死的计 fail_streak
+（连死 3 次进 archived），新发现的带翡翠台网关加为 T1。
 """
 
 import concurrent.futures
@@ -13,12 +16,14 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
 SEEDS_FILE = BASE_DIR / "seeds.txt"
+LIBRARY_FILE = BASE_DIR / "ip-library.json"
 OUTPUT_FILE = BASE_DIR / "results" / "candidates.json"
 STATS_FILE = BASE_DIR / "results" / "scan_stats.json"
 
@@ -29,6 +34,8 @@ TIMEOUT = 2.5            # IP 扫描超时（秒；海外 runner 到国内酒店
 JSON_TIMEOUT = 6.0       # 频道 JSON 拉取超时（秒）
 MAX_WORKERS = 500
 RETRY_TIMES = 1
+ARCHIVE_AFTER_FAILS = 3  # 连死几次进 archived
+MAX_CHANNELS_STORED = 100  # 库里每个网关最多记多少个频道名
 RETRY_INTERVAL = 0.02
 IP_SEGMENT_RANGE = range(1, 256)
 
@@ -53,6 +60,7 @@ stats = {
     "seeds": 0,
     "seeds_local": 0,
     "seeds_remote": 0,
+    "library_seeds": 0,
     "tasks": 0,
     "valid_ips": 0,
     "valid_by_seed": {},
@@ -134,6 +142,167 @@ def expand_seed(seed):
             for i in IP_SEGMENT_RANGE]
 
 
+# ---------------- IP 库 ----------------
+
+TIER_ORDER = {"T1": 0, "T2": 1, "T3": 2, "archived": 3}
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def gateway_url(ip, port):
+    return f"http://{ip}:{port}/iptv/live/1000.json?key=txiptv"
+
+
+def load_library():
+    """读 ip-library.json；没有或坏了就返回空库（不致命，照常用种子扫）。"""
+    if not LIBRARY_FILE.exists():
+        print("【IP库】无 ip-library.json，只用种子扫")
+        return {"version": 1, "gateways": []}
+    try:
+        lib = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+        rows = lib.get("gateways", [])
+        print(f"【IP库】读入 {len(rows)} 行 "
+              f"(T1 {sum(1 for r in rows if r.get('tier') == 'T1')} / "
+              f"T2 {sum(1 for r in rows if r.get('tier') == 'T2')} / "
+              f"T3 {sum(1 for r in rows if r.get('tier') == 'T3')} / "
+              f"archived {sum(1 for r in rows if r.get('tier') == 'archived')})")
+        return lib
+    except (ValueError, OSError) as e:
+        print(f"【IP库】读库失败（{e}），只用种子扫")
+        return {"version": 1, "gateways": []}
+
+
+def library_probe_tasks(lib):
+    """库里的网关转成探测任务：T1/T2 扩 /24，T3 只探本机，archived 跳过。"""
+    tasks = []
+    for row in lib.get("gateways", []):
+        tier = row.get("tier")
+        if tier in ("T1", "T2"):
+            tasks.extend(expand_seed(f"{row['ip']}:{row['port']}"))
+        elif tier == "T3":
+            tasks.append(gateway_url(row["ip"], row["port"]))
+    stats["library_seeds"] = len(lib.get("gateways", []))
+    return tasks
+
+
+def build_stream_url(base, item):
+    """把 JSON 里一条频道拼成最终流地址（与 extract_jade 同一套规则）。"""
+    urlx = item.get("url", "")
+    chid = item.get("chid", "")
+    srcid = item.get("srcid", "")
+    if urlx.startswith("http"):
+        return urlx.strip()
+    if urlx.startswith("udp"):
+        return (f"{base}/tsfile/live/{chid}_{srcid}.m3u8"
+                f"?key=txiptv&playlive=1&down=1")
+    return f"{base}{urlx}".strip()
+
+
+def classify_gateway(row, valid_set):
+    """给库里一个网关定级：活着就拉一次 JSON 记频道、重算分级；死了计 fail_streak。"""
+    url = gateway_url(row["ip"], row["port"])
+    if url not in valid_set:
+        row["alive_streak"] = 0
+        row["fail_streak"] = row.get("fail_streak", 0) + 1
+        if row["fail_streak"] >= ARCHIVE_AFTER_FAILS and row.get("tier") != "archived":
+            row["tier"] = "archived"
+            print(f"【IP库】{row['ip']}:{row['port']} 连死 {row['fail_streak']} 次 -> archived")
+        return "dead"
+    # 活着：拉 JSON 记频道
+    row["last_alive"] = now_iso()
+    row["alive_streak"] = row.get("alive_streak", 0) + 1
+    row["fail_streak"] = 0
+    resp = request_with_retry(url, timeout=JSON_TIMEOUT)
+    if resp is None:
+        print(f"【IP库】{row['ip']}:{row['port']} 探活但 JSON 拉不到，频道/分级保持原样")
+        return "alive_nojson"
+    try:
+        data = resp.json()
+    except ValueError:
+        print(f"【IP库】{row['ip']}:{row['port']} JSON 解析失败，频道/分级保持原样")
+        return "alive_nojson"
+    names = []
+    jade_streams = []
+    base = f"http://{row['ip']}:{row['port']}"
+    for item in data.get("data", []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name", "")
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+        if TARGET in name and EXCLUDE not in name:
+            jade_streams.append(build_stream_url(base, item))
+    row["channels"] = names[:MAX_CHANNELS_STORED]
+    row["jade_streams"] = jade_streams
+    has_gd = any("广东" in n for n in names)
+    old_tier = row.get("tier")
+    if jade_streams:
+        row["tier"] = "T1"
+    elif has_gd:
+        row["tier"] = "T2"
+    else:
+        row["tier"] = "T3"
+    if row["tier"] != old_tier:
+        print(f"【IP库】{row['ip']}:{row['port']} {old_tier} -> {row['tier']} "
+              f"（频道 {len(names)} 个，翡翠台 {len(jade_streams)} 条）")
+    return "alive"
+
+
+def update_library(lib, valid_set, candidates):
+    """跑完写回库：已知行定级/衰减 + 新发现的带翡翠台网关加为 T1。"""
+    rows = lib.get("gateways", [])
+    known = {(r["ip"], r["port"]) for r in rows}
+    counts = {"alive": 0, "alive_nojson": 0, "dead": 0}
+    for row in rows:
+        counts[classify_gateway(row, valid_set)] += 1
+    # 新 T1：候选的 source_ip 不在库里 -> 加行（JSON 列出，未做 HEAD 验流）
+    new_t1 = []
+    for c in candidates:
+        base = c.get("source_ip", "")
+        m = re.match(r"http://([^/:]+)(?::(\d+))?$", base)
+        if not m:
+            continue
+        key = (m.group(1), int(m.group(2) or 9901))
+        if key in known:
+            continue
+        known.add(key)
+        new_t1.append({
+            "ip": key[0], "port": key[1], "tier": "T1", "region": "广东",
+            "first_seen": now_iso()[:10], "source": "scan",
+            "last_alive": now_iso(), "alive_streak": 1, "fail_streak": 0,
+            "channels": ["翡翠台"], "jade_streams": [c["url"]],
+            "stream_verified": False,
+            "verified_by": "scan.py：JSON 列出翡翠台，未做 HEAD 验流",
+        })
+        print(f"【IP库】新 T1：{key[0]}:{key[1]}（{c['name']}）")
+    rows.extend(new_t1)
+    rows.sort(key=lambda r: (TIER_ORDER.get(r.get("tier"), 9), r["ip"], r["port"]))
+    lib["gateways"] = rows
+    lib["updated"] = now_iso()
+    lib.setdefault("version", 1)
+    try:
+        LIBRARY_FILE.write_text(
+            json.dumps(lib, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"【IP库】写回 {len(rows)} 行（新 T1 {len(new_t1)} 个，"
+              f"活 {counts['alive']} / 活但无JSON {counts['alive_nojson']} / 死 {counts['dead']}）")
+    except OSError as e:
+        print(f"【IP库】写回失败（{e}），结果文件不受影响")
+    return {
+        "rows": len(rows),
+        "t1": sum(1 for r in rows if r.get("tier") == "T1"),
+        "t2": sum(1 for r in rows if r.get("tier") == "T2"),
+        "t3": sum(1 for r in rows if r.get("tier") == "T3"),
+        "archived": sum(1 for r in rows if r.get("tier") == "archived"),
+        "new_t1": [f"{r['ip']}:{r['port']}" for r in new_t1],
+        "alive": counts["alive"],
+        "dead": counts["dead"],
+    }
+
+
 def is_url_accessible(url):
     global scan_counter, valid_counter
     resp = request_with_retry(url, timeout=TIMEOUT)
@@ -182,16 +351,9 @@ def extract_jade(url):
         bump("jade_hits")
         chid = item.get("chid", "")
         srcid = item.get("srcid", "")
-        if urlx.startswith("http"):
-            final_url = urlx.strip()
-        elif urlx.startswith("udp"):
-            final_url = (f"{base}/tsfile/live/{chid}_{srcid}.m3u8"
-                         f"?key=txiptv&playlive=1&down=1")
-        else:
-            final_url = f"{base}{urlx}".strip()
         out.append({
             "name": name,
-            "url": final_url,
+            "url": build_stream_url(base, item),
             "chid": chid,
             "srcid": srcid,
             "source_ip": base,
@@ -201,11 +363,13 @@ def extract_jade(url):
 
 
 def main():
+    lib = load_library()
     seeds = load_seeds()
     print(f"【种子】{len(seeds)} 个（本地 {stats['seeds_local']} + 远程 {stats['seeds_remote']}）")
     tasks = []
     for seed in seeds:
         tasks.extend(expand_seed(seed))
+    tasks.extend(library_probe_tasks(lib))
     tasks = sorted(set(tasks))  # 多个种子同 /24 同端口会扩出重复地址，去重
     print(f"【扫描任务】{len(tasks)} 个（去重后）")
 
@@ -235,11 +399,23 @@ def main():
     for c in candidates:
         print(f"  {c['name']} | {c['url']}")
 
+    # 写回 IP 库（不影响上面的结果文件）
+    lib_stats = update_library(lib, set(valid_urls), candidates)
+
     stats["seeds"] = len(seeds)
     stats["tasks"] = len(tasks)
     stats["valid_ips"] = len(valid_urls)
     stats["duration_s"] = round(time.time() - t0, 1)
     stats["timeouts"] = {"probe_s": TIMEOUT, "json_s": JSON_TIMEOUT}
+    stats["library"] = lib_stats
+    # 匹配度 4 个数（库的目标就是让它们涨）
+    alive = len(valid_urls)
+    stats["metrics"] = {
+        "alive_rate": round(alive / len(tasks), 4) if tasks else 0,
+        "jade_rate": round(lib_stats["t1"] / alive, 4) if alive else 0,
+        "gd_coverage": None,  # 下轮：从库里 T1+T2 占比算
+        "stream_ok_rate": None,  # scan.py 只验 JSON 列表，不验流；test.py 那套才有
+    }
     STATS_FILE.write_text(
         json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"【统计】{json.dumps(stats, ensure_ascii=False)}")
